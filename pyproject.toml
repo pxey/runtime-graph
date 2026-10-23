@@ -36,7 +36,7 @@ dev = [
 causeg = "causality_graph.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/example/runtime-causality-graph"
+Homepage = "https://github.com/pxey/runtime-graph"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/causality_graph"]
