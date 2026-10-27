@@ -48,6 +48,9 @@ class CausalityTracer:
         self._trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
             f"causality_trace_id_{id(self)}", default=None
         )
+        self._recorded_exceptions: contextvars.ContextVar[tuple[tuple[BaseException, Event], ...]] = contextvars.ContextVar(
+            f"causality_recorded_exceptions_{id(self)}", default=()
+        )
 
     # -- trace scope ----------------------------------------------------------
 
@@ -59,10 +62,12 @@ class CausalityTracer:
         """
         tid = trace_id or _new_trace_id()
         token_trace = self._trace_id.set(tid)
+        token_exceptions = self._recorded_exceptions.set(())
         try:
             with self._span(EventKind.PROCESS, name):
                 yield tid
         finally:
+            self._recorded_exceptions.reset(token_exceptions)
             self._trace_id.reset(token_trace)
 
     # -- internal ----------------------------------------------------------
@@ -80,10 +85,12 @@ class CausalityTracer:
         **attributes: Any,
     ) -> Iterator[Event]:
         token_trace = None
+        token_exceptions = None
         tid = self._trace_id.get()
         if tid is None:
             tid = _new_trace_id()
             token_trace = self._trace_id.set(tid)
+            token_exceptions = self._recorded_exceptions.set(())
 
         try:
             parent = self._current_parent()
@@ -113,15 +120,26 @@ class CausalityTracer:
                 yield event
             except BaseException as exc:  # noqa: BLE001 - re-raised below
                 status = EventStatus.ERROR
-                self._record_exception_for(event, exc)
+                recorded = self._find_recorded_exception(exc)
+                if recorded is None:
+                    recorded = self._record_exception_for(event, exc)
+                    self._recorded_exceptions.set(self._recorded_exceptions.get() + ((exc, recorded),))
                 raise
             finally:
                 self._stack.reset(token)
                 finished = event.model_copy(update={"ended_at": _now(), "status": status})
                 self.storage.save_event(finished)
         finally:
+            if token_exceptions is not None:
+                self._recorded_exceptions.reset(token_exceptions)
             if token_trace is not None:
                 self._trace_id.reset(token_trace)
+
+    def _find_recorded_exception(self, exc: BaseException) -> Event | None:
+        for recorded_exc, event in self._recorded_exceptions.get():
+            if recorded_exc is exc:
+                return event
+        return None
 
     def _record_exception_for(self, parent_event: Event, exc: BaseException) -> Event:
         exc_event = Event(
@@ -202,10 +220,15 @@ class CausalityTracer:
     def record_exception(self, exc: BaseException) -> Event | None:
         """Manually attach an exception to the currently open scope,
         without letting it propagate (use this in an ``except`` block)."""
+        recorded = self._find_recorded_exception(exc)
+        if recorded is not None:
+            return recorded
         parent = self._current_parent()
         if parent is None:
             return None
-        return self._record_exception_for(parent, exc)
+        event = self._record_exception_for(parent, exc)
+        self._recorded_exceptions.set(self._recorded_exceptions.get() + ((exc, event),))
+        return event
 
     # -- explicit / inferred correlation ----------------------------------------------------------
 
