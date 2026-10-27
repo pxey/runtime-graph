@@ -8,10 +8,12 @@ from causality_graph.storage import InMemoryStorage
 
 def test_why_reconstructs_full_chain():
     tracer = CausalityTracer(storage=InMemoryStorage())
-    with tracer.trace("checkout"):
-        with tracer.function("validate_cart"):
-            with tracer.db_operation("orders", "INSERT"):
-                outcome = tracer.outcome("order_created", status="ok")
+    with (
+        tracer.trace("checkout"),
+        tracer.function("validate_cart"),
+        tracer.db_operation("orders", "INSERT"),
+    ):
+        outcome = tracer.outcome("order_created", status="ok")
 
     engine = CausalityGraphEngine(tracer.storage)
     trace = engine.why(outcome.id)
@@ -28,11 +30,13 @@ def test_why_unknown_event_returns_none():
 
 def test_root_cause_candidates_finds_upstream_exception():
     tracer = CausalityTracer(storage=InMemoryStorage())
-    with pytest.raises(TimeoutError):
-        with tracer.trace("checkout"):
-            with tracer.function("charge_card"):
-                with tracer.external_service("payment-gateway"):
-                    raise TimeoutError("gateway timeout")
+    with (
+        pytest.raises(TimeoutError),
+        tracer.trace("checkout"),
+        tracer.function("charge_card"),
+        tracer.external_service("payment-gateway"),
+    ):
+        raise TimeoutError("gateway timeout")
 
     events = tracer.storage.all_events()
     gateway_event = next(e for e in events if e.kind.value == "external_service")
@@ -60,13 +64,11 @@ def test_timeline_is_chronological():
 
 def test_inferred_link_is_distinguishable_from_observed():
     tracer = CausalityTracer(storage=InMemoryStorage())
-    with tracer.trace("producer") as _:
-        with tracer.queue_job("enqueue-email", job_id="job-1") as producer_event:
-            pass
+    with tracer.trace("producer"), tracer.queue_job("enqueue-email", job_id="job-1") as producer_event:
+        pass
 
-    with tracer.trace("consumer") as _:
-        with tracer.queue_job("send-email", job_id="job-1") as consumer_event:
-            pass
+    with tracer.trace("consumer"), tracer.queue_job("send-email", job_id="job-1") as consumer_event:
+        pass
 
     tracer.link(producer_event.id, consumer_event.id, reason="shared job_id=job-1")
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .models import CausalEdge, CausalStep, CausalTrace, Event, EventStatus
+from .models import CausalStep, CausalTrace, Event, EventStatus
 from .storage import StorageBackend
 
 
