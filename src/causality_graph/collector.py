@@ -30,10 +30,6 @@ from typing import Any, Iterator
 from .models import CausalEdge, Event, EventKind, EventStatus, RelationshipType
 from .storage import SQLiteStorage, StorageBackend
 
-_stack: contextvars.ContextVar[tuple[Event, ...]] = contextvars.ContextVar("causality_stack", default=())
-_trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("causality_trace_id", default=None)
-
-
 def _new_trace_id() -> str:
     return f"trace_{uuid.uuid4().hex[:12]}"
 
@@ -43,6 +39,14 @@ class CausalityTracer:
 
     def __init__(self, storage: StorageBackend | None = None) -> None:
         self.storage: StorageBackend = storage if storage is not None else SQLiteStorage()
+        # Keep trace context per tracer so nested tracer instances cannot create
+        # cross-storage parent edges or leak trace IDs into unrelated spans.
+        self._stack: contextvars.ContextVar[tuple[Event, ...]] = contextvars.ContextVar(
+            f"causality_stack_{id(self)}", default=()
+        )
+        self._trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+            f"causality_trace_id_{id(self)}", default=None
+        )
 
     # -- trace scope ----------------------------------------------------------
 
@@ -53,17 +57,17 @@ class CausalityTracer:
         trace id) shares the same ``trace_id``.
         """
         tid = trace_id or _new_trace_id()
-        token_trace = _trace_id.set(tid)
+        token_trace = self._trace_id.set(tid)
         try:
             with self._span(EventKind.PROCESS, name):
                 yield tid
         finally:
-            _trace_id.reset(token_trace)
+            self._trace_id.reset(token_trace)
 
     # -- internal ----------------------------------------------------------
 
     def _current_parent(self) -> Event | None:
-        stack = _stack.get()
+        stack = self._stack.get()
         return stack[-1] if stack else None
 
     @contextlib.contextmanager
@@ -74,43 +78,49 @@ class CausalityTracer:
         resource: str | None = None,
         **attributes: Any,
     ) -> Iterator[Event]:
-        parent = self._current_parent()
-        tid = _trace_id.get() or _new_trace_id()
-        if _trace_id.get() is None:
-            _trace_id.set(tid)
+        token_trace = None
+        tid = self._trace_id.get()
+        if tid is None:
+            tid = _new_trace_id()
+            token_trace = self._trace_id.set(tid)
 
-        event = Event(
-            kind=kind,
-            name=name,
-            trace_id=tid,
-            parent_id=parent.id if parent else None,
-            resource=resource,
-            attributes=attributes,
-        )
-        self.storage.save_event(event)
-        if parent is not None:
-            self.storage.save_edge(
-                CausalEdge(
-                    parent_id=parent.id,
-                    child_id=event.id,
-                    relationship=RelationshipType.OBSERVED,
-                    confidence=1.0,
-                    reason="nested execution scope",
-                )
-            )
-
-        token = _stack.set(_stack.get() + (event,))
-        status = EventStatus.OK
         try:
-            yield event
-        except BaseException as exc:  # noqa: BLE001 - re-raised below
-            status = EventStatus.ERROR
-            self._record_exception_for(event, exc)
-            raise
+            parent = self._current_parent()
+            event = Event(
+                kind=kind,
+                name=name,
+                trace_id=tid,
+                parent_id=parent.id if parent else None,
+                resource=resource,
+                attributes=attributes,
+            )
+            self.storage.save_event(event)
+            if parent is not None:
+                self.storage.save_edge(
+                    CausalEdge(
+                        parent_id=parent.id,
+                        child_id=event.id,
+                        relationship=RelationshipType.OBSERVED,
+                        confidence=1.0,
+                        reason="nested execution scope",
+                    )
+                )
+
+            token = self._stack.set(self._stack.get() + (event,))
+            status = EventStatus.OK
+            try:
+                yield event
+            except BaseException as exc:  # noqa: BLE001 - re-raised below
+                status = EventStatus.ERROR
+                self._record_exception_for(event, exc)
+                raise
+            finally:
+                self._stack.reset(token)
+                finished = event.model_copy(update={"ended_at": _now(), "status": status})
+                self.storage.save_event(finished)
         finally:
-            _stack.reset(token)
-            finished = event.model_copy(update={"ended_at": _now(), "status": status})
-            self.storage.save_event(finished)
+            if token_trace is not None:
+                self._trace_id.reset(token_trace)
 
     def _record_exception_for(self, parent_event: Event, exc: BaseException) -> Event:
         exc_event = Event(
@@ -171,7 +181,7 @@ class CausalityTracer:
         if isinstance(status, str):
             status = EventStatus(status)
         parent = self._current_parent()
-        tid = _trace_id.get() or _new_trace_id()
+        tid = self._trace_id.get() or _new_trace_id()
         event = Event(
             kind=EventKind.OUTCOME,
             name=name,
