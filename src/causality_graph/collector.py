@@ -25,7 +25,8 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import uuid
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 from .models import CausalEdge, Event, EventKind, EventStatus, RelationshipType
 from .storage import SQLiteStorage, StorageBackend
@@ -118,7 +119,7 @@ class CausalityTracer:
             status = EventStatus.OK
             try:
                 yield event
-            except BaseException as exc:  # noqa: BLE001 - re-raised below
+            except BaseException as exc:
                 status = EventStatus.ERROR
                 recorded = self._find_recorded_exception(exc)
                 if recorded is None:
@@ -258,6 +259,6 @@ class CausalityTracer:
 
 
 def _now():
-    from datetime import datetime, timezone
+    from datetime import UTC, datetime
 
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
