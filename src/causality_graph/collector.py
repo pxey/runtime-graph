@@ -30,6 +30,7 @@ from typing import Any, Iterator
 from .models import CausalEdge, Event, EventKind, EventStatus, RelationshipType
 from .storage import SQLiteStorage, StorageBackend
 
+
 def _new_trace_id() -> str:
     return f"trace_{uuid.uuid4().hex[:12]}"
 
