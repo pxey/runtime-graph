@@ -6,10 +6,12 @@ from causality_graph.storage import InMemoryStorage
 
 def test_nested_spans_record_parent_child_edges():
     tracer = CausalityTracer(storage=InMemoryStorage())
-    with tracer.trace("checkout"):
-        with tracer.function("validate_cart") as validate_event:
-            with tracer.db_operation("orders", "INSERT") as db_event:
-                pass
+    with (
+        tracer.trace("checkout"),
+        tracer.function("validate_cart") as validate_event,
+        tracer.db_operation("orders", "INSERT") as db_event,
+    ):
+        pass
 
     edges = tracer.storage.all_edges()
     pairs = {(e.parent_id, e.child_id) for e in edges}
@@ -18,10 +20,12 @@ def test_nested_spans_record_parent_child_edges():
 
 def test_exception_propagates_and_is_recorded():
     tracer = CausalityTracer(storage=InMemoryStorage())
-    with pytest.raises(TimeoutError):
-        with tracer.trace("checkout"):
-            with tracer.external_service("payment-gateway"):
-                raise TimeoutError("gateway timeout")
+    with (
+        pytest.raises(TimeoutError),
+        tracer.trace("checkout"),
+        tracer.external_service("payment-gateway"),
+    ):
+        raise TimeoutError("gateway timeout")
 
     events = tracer.storage.all_events()
     exc_events = [e for e in events if e.kind == EventKind.EXCEPTION]
@@ -50,9 +54,8 @@ def test_record_exception_without_propagating():
 
 def test_outcome_links_to_current_parent():
     tracer = CausalityTracer(storage=InMemoryStorage())
-    with tracer.trace("checkout"):
-        with tracer.function("finalize"):
-            outcome = tracer.outcome("checkout_succeeded", status="ok")
+    with tracer.trace("checkout"), tracer.function("finalize"):
+        outcome = tracer.outcome("checkout_succeeded", status="ok")
 
     edges_into_outcome = tracer.storage.edges_into(outcome.id)
     assert len(edges_into_outcome) == 1
@@ -64,6 +67,7 @@ def test_stack_resets_after_scope_exits():
         pass
     assert tracer.current_event() is None
 
+
 def test_context_is_isolated_between_tracer_instances():
     first_storage = InMemoryStorage()
     second_storage = InMemoryStorage()
@@ -71,9 +75,8 @@ def test_context_is_isolated_between_tracer_instances():
     second = CausalityTracer(storage=second_storage)
 
     with first.trace("first-trace") as first_trace_id:
-        with second.trace("second-trace") as second_trace_id:
-            with second.function("inner") as inner:
-                pass
+        with second.trace("second-trace") as second_trace_id, second.function("inner") as inner:
+            pass
         with first.function("after") as after:
             pass
 
